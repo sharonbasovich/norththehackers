@@ -18,7 +18,7 @@ from ..models import Attempt, Campaign, Claim, Evidence, Idea, IdeaParent, Relat
 from .artifacts import store_artifact
 from .events import emit
 from .lean_checker import LeanChecker, normalize
-from .research import claim_state, ingest_links, scope_ids
+from .research import idea_status, ingest_links, scope_ids
 
 WORKER_STATUS_MAP: dict[tuple[str, str], str] = {
     ("counterexample_search", "supports"): "counterexample_checked",
@@ -266,6 +266,9 @@ class Ingestor:
             record_id=claim.id,
             payload={"campaign_id": campaign.id},
         )
+        db.expire(idea, ["claims"])
+        idea.evidence_status, idea.formalization_status = idea_status(idea)
+        emit(db, "idea.evidence_updated", record_type="idea", record_id=idea.id)
         return claim, True
 
     # -- evidence ----------------------------------------------------------------------------
@@ -405,15 +408,7 @@ class Ingestor:
             emit(db, "claim.evidence_updated", record_type="claim", record_id=claim.id)
         if idea is not None:
             db.expire(idea, ["claims", "evidence"])
-            # A verified sublemma does not certify the entire approach or its other claims.
-            if idea.claims and all(claim_state(c) == "lean_verified" for c in idea.claims):
-                idea.evidence_status = "lean_verified"
-                idea.formalization_status = "complete"
-            elif any(claim_state(c) == "unresolved_conflict" for c in idea.claims):
-                idea.evidence_status = "unresolved_conflict"
-            elif idea.evidence_status == "lean_verified":
-                idea.evidence_status = "lean_formalization_in_progress"
-                idea.formalization_status = "in_progress"
+            idea.evidence_status, idea.formalization_status = idea_status(idea)
             emit(db, "idea.evidence_updated", record_type="idea", record_id=idea.id)
         return 1, lean_checks
 

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import Attempt, Campaign, Claim, Relation, SelectionDecision
+from ..models import Attempt, Campaign, Claim, Idea, Relation, SelectionDecision
 from .events import emit
 
 OPEN_ATTEMPTS = {"queued", "dispatching", "running", "blocked"}
@@ -57,6 +57,23 @@ def claim_state(claim: Claim) -> str:
     if any(e.result == "supports" for e in evidence):
         return "empirically_supported"
     return "untested"
+
+
+def idea_status(idea: Idea) -> tuple[str, str]:
+    """Derive verification from all current claims, including for stale stored labels."""
+    states = [claim_state(c) for c in idea.claims]
+    if states and all(state == "lean_verified" for state in states):
+        return "lean_verified", "complete"
+    status, formal = idea.evidence_status, idea.formalization_status
+    if "unresolved_conflict" in states:
+        status = "unresolved_conflict"
+    elif status == "lean_verified":
+        status = "lean_formalization_in_progress" if states else "untested"
+    elif "lean_verified" in states and status not in {"refuted", "unresolved_conflict"}:
+        status = "lean_formalization_in_progress"
+    if formal == "complete" or "lean_verified" in states:
+        formal = "in_progress" if states else "absent"
+    return status, formal
 
 
 def claim_revision(claim: Claim) -> str:

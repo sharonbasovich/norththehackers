@@ -7,12 +7,13 @@ from sqlalchemy.orm import Session
 from app.auth import hash_key
 from app.db import SessionLocal
 from app.deps import get_scheduler
-from app.models import Attempt, Campaign, Claim, Evidence, Relation
+from app.models import Attempt, Campaign, Claim, Evidence, Relation, SelectionDecision
 from app.services.lean_checker import LeanChecker, LeanCheckResult
 from app.services.research import (
     claim_state,
     dependency_gaps,
     frontier,
+    idea_status,
     memory,
     pool_campaigns,
     record_link,
@@ -353,8 +354,166 @@ def test_shared_proof_closes_only_exact_target_and_not_sibling_claims(
         )
         assert claim_state(claim) == "lean_verified"
         assert claim.idea and claim.idea.evidence_status != "lean_verified"
+        assert claim.idea.formalization_status != "complete"
+        assert get_scheduler()._wants_formalizer(claim.idea)
         assert b.research_outcome == "proven"
         assert a.research_outcome != "proven"
+
+
+def test_late_claim_removes_verification_and_verified_score(
+    client: TestClient, monkeypatch
+) -> None:
+    _, ids = _pool(client)
+    monkeypatch.setattr(
+        LeanChecker, "check", lambda *args, **kwargs: LeanCheckResult(status="verified")
+    )
+    scheduler = get_scheduler()
+    with SessionLocal() as db:
+        campaign = db.get(Campaign, ids[0])
+        assert campaign
+        first = _claim(db, campaign)
+        idea = first.idea
+        assert idea
+
+        def prove(claim: Claim) -> None:
+            _submit(
+                db,
+                campaign,
+                {
+                    "evidence": [
+                        {
+                            "target": claim.id,
+                            "check_type": "lean_attempt",
+                            "result": "inconclusive",
+                            "summary": "fixture proof",
+                            "artifact": {
+                                "filename": "proof.lean",
+                                "content": claim.lean_declaration + " := rfl",
+                            },
+                        }
+                    ],
+                },
+            )
+
+        prove(first)
+        assert idea_status(idea) == ("lean_verified", "complete")
+        assert not scheduler._wants_formalizer(idea)
+        producer = db.get(Attempt, idea.produced_by_attempt_id)
+        assert producer
+        # Streaming output can append a claim after the first one has been certified.
+        scheduler.ingestor.ingest(
+            db,
+            producer,
+            {
+                "ideas": [
+                    {
+                        "title": idea.title,
+                        "approach": idea.approach,
+                        "claims": [{"statement": "Later unproved claim"}],
+                    }
+                ]
+            },
+            partial=True,
+        )
+        sibling = next(c for c in idea.claims if c.id != first.id)
+        assert claim_state(first) == "lean_verified"
+        assert claim_state(sibling) == "untested"
+        assert (idea.evidence_status, idea.formalization_status) == (
+            "lean_formalization_in_progress",
+            "in_progress",
+        )
+        assert scheduler._wants_formalizer(idea)
+        projection = scheduler.publisher._idea(db, idea.id)
+        assert projection and projection[0]["evidence_status"] != "lean_verified"
+        assert projection[0]["formalization_status"] != "complete"
+
+        # A legacy stored label must not give this branch the full-verification score.
+        idea.evidence_status, idea.formalization_status = "lean_verified", "complete"
+        _submit(
+            db,
+            campaign,
+            {
+                "evidence": [
+                    {
+                        "target": idea.id,
+                        "check_type": "critique",
+                        "result": "supports",
+                        "summary": "No refutation in fixture",
+                    }
+                ]
+            },
+        )
+        idea.evidence_status, idea.formalization_status = "lean_verified", "complete"
+        assert scheduler._wants_formalizer(idea)
+        assert scheduler.maybe_select(db, campaign)
+        decision = db.scalar(select(SelectionDecision).where(SelectionDecision.idea_id == idea.id))
+        assert decision and decision.score_components["evidence"] == 3.0
+        assert scheduler.publisher._idea(db, idea.id)[0]["evidence_status"] != "lean_verified"
+
+        sibling.lean_declaration = "theorem sibling : 2 + 2 = 4"
+        prove(sibling)
+        assert idea_status(idea) == ("lean_verified", "complete")
+        assert not scheduler._wants_formalizer(idea)
+
+
+def test_formalizer_eligibility_uses_current_claim_version(client: TestClient) -> None:
+    _, ids = _pool(client)
+    scheduler = get_scheduler()
+    with SessionLocal() as db:
+        campaign = db.get(Campaign, ids[0])
+        assert campaign
+        claim = _claim(db, campaign)
+        idea = claim.idea
+        assert idea
+        db.add_all(
+            [
+                Evidence(
+                    idea_id=idea.id,
+                    claim_id=claim.id,
+                    claim_version=1,
+                    check_type="lean_attempt",
+                    result="supports",
+                    summary="worker assertion",
+                ),
+                Evidence(
+                    idea_id=idea.id,
+                    claim_id=claim.id,
+                    claim_version=1,
+                    check_type="lean_check",
+                    result="verified",
+                    certified=True,
+                    summary="old-version fixture",
+                ),
+                Evidence(
+                    idea_id=idea.id, check_type="critique", result="supports", summary="review"
+                ),
+            ]
+        )
+        db.flush()
+        db.expire(claim, ["evidence"])
+        db.expire(idea, ["evidence"])
+        idea.evidence_status, idea.formalization_status = "lean_verified", "complete"
+        assert not scheduler._wants_formalizer(idea)
+        claim.version = 2
+        assert idea_status(idea) == ("lean_formalization_in_progress", "in_progress")
+        assert scheduler._wants_formalizer(idea)
+        assert scheduler._next_role(idea) == "prover_formalizer"
+        # A new worker claim of success is not independent verification and is not retried.
+        db.add(
+            Evidence(
+                idea_id=idea.id,
+                claim_id=claim.id,
+                claim_version=2,
+                check_type="lean_attempt",
+                result="supports",
+                summary="uncertified",
+            )
+        )
+        db.flush()
+        db.expire(claim, ["evidence"])
+        assert idea_status(idea)[0] != "lean_verified"
+        assert not scheduler._wants_formalizer(idea)
+        assert scheduler._next_role(idea) is None
 
 
 def test_pause_limits_duplicate_work_and_comparison_context(client: TestClient) -> None:

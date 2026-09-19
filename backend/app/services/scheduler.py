@@ -25,6 +25,7 @@ from ..config import Settings
 from ..models import (
     Attempt,
     Campaign,
+    Claim,
     Evidence,
     Idea,
     Portfolio,
@@ -36,7 +37,15 @@ from .events import emit
 from .ingest import Ingestor
 from .prompts import ROLE_INSTRUCTIONS, build_prompt
 from .publication import Publisher
-from .research import claim_state, frontier, memory, pool_campaigns, pool_claims, pool_relations
+from .research import (
+    claim_state,
+    frontier,
+    idea_status,
+    memory,
+    pool_campaigns,
+    pool_claims,
+    pool_relations,
+)
 from .selection import Candidate, select_generation
 
 RUNNING = {"queued", "dispatching", "running", "blocked"}
@@ -361,6 +370,21 @@ class Scheduler:
         return 0
 
     @staticmethod
+    def _unattempted_claims(idea: Idea) -> list[Claim]:
+        # An unscoped attempt still consumes the idea's one generic formalization pass.
+        if any(e.check_type == "lean_attempt" and e.claim_id is None for e in idea.evidence):
+            return []
+        return [
+            c
+            for c in idea.claims
+            if claim_state(c) not in NOT_FORMALIZABLE
+            and c.formalization_status != "blocked"
+            and not any(
+                e.check_type == "lean_attempt" and e.claim_version == c.version for e in c.evidence
+            )
+        ]
+
+    @staticmethod
     def _next_role(idea: Idea) -> str | None:
         """Cheapest informative next step for an idea in the current generation."""
         types = {e.check_type for e in idea.evidence}
@@ -373,29 +397,26 @@ class Scheduler:
             return "experimenter" if idea.next_experiment else "critic"
         if "critique" not in types:
             return "critic"
-        formal_claims = [
-            c
-            for c in idea.claims
-            if c.lean_declaration and c.formalization_status not in {"complete", "blocked"}
-        ]
+        formal_claims = [c for c in Scheduler._unattempted_claims(idea) if c.lean_declaration]
         if (
-            idea.evidence_status
+            idea_status(idea)[0]
             in {"informal_proof_candidate", "proof_sketch", "lean_formalization_in_progress"}
             and formal_claims
-            and "lean_attempt" not in types
         ):
             return "prover_formalizer"
         return None
 
     @staticmethod
     def _wants_formalizer(idea: Idea) -> bool:
-        """Promoted ideas without a Lean attempt whose critique did not refute them get one
-        formalization pass; the worker picks the strongest provable sub-statement."""
-        if not idea.claims or any(e.check_type == "lean_attempt" for e in idea.evidence):
+        """Allow a pass for untouched current claim versions, unless the idea is refuted.
+
+        Attempts on sibling claims do not consume this opportunity.
+        """
+        if not Scheduler._unattempted_claims(idea):
             return False
         if any(e.check_type == "critique" and e.result == "refutes" for e in idea.evidence):
             return False
-        return idea.evidence_status not in NOT_FORMALIZABLE
+        return idea_status(idea)[0] not in NOT_FORMALIZABLE
 
     def _open_attempts(self, db: Session, campaign: Campaign) -> list[Attempt]:
         return list(
@@ -652,6 +673,7 @@ class Scheduler:
         claims = pool_claims(db, campaigns)
         links = pool_relations(db, claims, campaigns)
         for idea in current:
+            status, formal = idea_status(idea)
             critiques = [e for e in idea.evidence if e.check_type == "critique"]
             cost = sum(
                 float((a.usage or {}).get("acus_consumed", 0.0))
@@ -673,9 +695,9 @@ class Scheduler:
                 Candidate(
                     idea_id=idea.id,
                     method_tags=list(idea.method_tags),
-                    evidence_status=idea.evidence_status,
+                    evidence_status=status,
                     review_status=idea.review_status,
-                    formalization_status=idea.formalization_status,
+                    formalization_status=formal,
                     depth=idea.depth,
                     pinned=idea.pinned,
                     evidence_count=len(idea.evidence),

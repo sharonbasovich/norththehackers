@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Campaign, Claim, Event, Evidence, Idea, Problem, Publication, utcnow
-from .research import claim_state
+from .research import claim_state, idea_status
 
 POLICY_VERSION = "v1"
 
@@ -172,6 +172,7 @@ class Publisher:
         idea = db.get(Idea, idea_id)
         if idea is None:
             return None
+        status, formal = idea_status(idea)
         payload = {
             "id": idea.id,
             "campaign_id": idea.campaign_id,
@@ -185,16 +186,16 @@ class Publisher:
             "depth": idea.depth,
             "parent_ids": [p.id for p in idea.parents],
             "scheduling_status": idea.scheduling_status,
-            "evidence_status": idea.evidence_status,
+            "evidence_status": status,
             "review_status": idea.review_status,
             "novelty_status": idea.novelty_status,
-            "formalization_status": idea.formalization_status,
+            "formalization_status": formal,
             "score": round(idea.score, 3),
             "pinned": idea.pinned,
             "claim_ids": [c.id for c in idea.claims],
             "created_at": idea.created_at.isoformat(),
         }
-        return payload, evidence_label(idea.evidence_status)
+        return payload, evidence_label(status)
 
     def _claim(self, db: Session, claim_id: str) -> tuple[dict, str] | None:
         claim = db.get(Claim, claim_id)
