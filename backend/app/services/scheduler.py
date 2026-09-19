@@ -33,7 +33,7 @@ from ..models import (
 from .devin_client import DEVIN_MODES, DevinClient
 from .events import emit
 from .ingest import Ingestor
-from .prompts import build_prompt
+from .prompts import ASSIGNMENT_ROLES, build_prompt
 from .publication import Publisher
 from .selection import Candidate, select_generation
 
@@ -334,6 +334,10 @@ class Scheduler:
     ) -> Attempt:
         if mode not in DEVIN_MODES:
             raise ValueError(f"unknown devin mode {mode!r}")
+        if role not in ASSIGNMENT_ROLES:
+            raise ValueError(
+                f"unknown assignment role {role!r}; expected one of {ASSIGNMENT_ROLES}"
+            )
         review = review or []
         attempt = Attempt(
             campaign_id=campaign.id,

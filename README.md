@@ -150,8 +150,16 @@ dependency. Install [elan](https://github.com/leanprover/elan), then
 2. compiles the submission inside the project and runs `#print axioms` on the target;
 3. records toolchain, project hash, elapsed time and full log as `Evidence.details`.
 
-If Lean is not installed the checker records a `checker_unavailable` blocker; it never
-pretends to verify. `MATHLAB_LEAN_PROJECT_DIR=""` disables it explicitly.
+Docker Compose runs Lean in a separate, non-root checker container. The service has no host
+port or public-internet route, uses a read-only filesystem apart from a temporary proof
+directory, drops Linux capabilities, and enforces CPU, memory and process limits. The backend
+authenticates to it with `MATHLAB_LEAN_CHECKER_TOKEN`; replace the development default before
+deployment. For non-Docker development, the backend can still run a local checker from
+`MATHLAB_LEAN_PROJECT_DIR`.
+
+If the isolated service or local toolchain is unavailable, the checker records a
+`checker_unavailable` blocker; it never pretends to verify. Set both
+`MATHLAB_LEAN_CHECKER_URL=""` and `MATHLAB_LEAN_PROJECT_DIR=""` to disable checking explicitly.
 
 ### Formalization stage
 

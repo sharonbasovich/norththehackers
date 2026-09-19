@@ -46,6 +46,11 @@ ROLE_INSTRUCTIONS: dict[str, str] = {
     ),
 }
 
+# Canonical role names accepted for both automatic and manually-created assignments.
+# Keep this derived from the prompt map so every accepted role is guaranteed to have
+# substantive instructions.
+ASSIGNMENT_ROLES = tuple(ROLE_INSTRUCTIONS)
+
 
 def describe_idea(idea: Idea) -> str:
     lines = [

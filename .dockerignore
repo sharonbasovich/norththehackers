@@ -1,0 +1,15 @@
+.git
+.env
+**/.env
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/*.pyc
+**/*.egg-info
+backend/mathlab.db*
+backend/artifacts
+frontend/node_modules
+frontend/dist
+lean/.checks
+lean/.lake

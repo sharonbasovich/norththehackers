@@ -200,6 +200,7 @@ export interface SchedulerStatus {
   lean_available: boolean;
   running_attempts: number;
   modes: string[];
+  roles: string[];
 }
 
 async function getJson<T>(url: string, headers: HeadersInit = {}): Promise<T> {

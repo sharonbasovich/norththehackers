@@ -21,6 +21,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import httpx
+
 FORBIDDEN_PATTERNS = (
     r"^\s*axiom\b",
     r"\bunsafe\b",
@@ -98,6 +100,21 @@ class LeanChecker:
         except (OSError, subprocess.TimeoutExpired) as exc:
             return f"unknown ({exc})"
 
+    def environment(self) -> dict:
+        if self.project_dir is None or not self.available():
+            return {"available": False}
+
+        def read(path: Path) -> str:
+            return path.read_text() if path.exists() else ""
+
+        return {
+            "available": True,
+            "toolchain": read(self.project_dir / "lean-toolchain").strip(),
+            "lakefile": read(self.project_dir / "lakefile.toml"),
+            "MathLab/Basic.lean": read(self.project_dir / "MathLab" / "Basic.lean"),
+            "allowed_axioms": sorted(self.allowed_axioms),
+        }
+
     def static_reject_reasons(
         self, source: str, target_decl: str, approved_target: str
     ) -> list[str]:
@@ -163,3 +180,85 @@ class LeanChecker:
             return result
         result.status = "verified"
         return result
+
+
+class RemoteLeanChecker(LeanChecker):
+    """Client for the isolated checker container.
+
+    Static policy checks run on both sides. Network or checker failures become an explicit
+    `checker_unavailable` result rather than accidentally accepting or crashing ingestion.
+    """
+
+    def __init__(
+        self,
+        service_url: str,
+        *,
+        token: str,
+        allowed_axioms: tuple[str, ...] = ("propext", "Classical.choice", "Quot.sound"),
+        timeout_seconds: int = 300,
+    ):
+        super().__init__(None, allowed_axioms, timeout_seconds)
+        self.service_url = service_url.rstrip("/")
+        self.token = token
+
+    @property
+    def _headers(self) -> dict[str, str]:
+        return {"X-Checker-Token": self.token}
+
+    def available(self) -> bool:
+        try:
+            response = httpx.get(f"{self.service_url}/health", timeout=5)
+            response.raise_for_status()
+            return bool(response.json().get("available"))
+        except (httpx.HTTPError, ValueError):
+            return False
+
+    def environment(self) -> dict:
+        try:
+            response = httpx.get(
+                f"{self.service_url}/environment", headers=self._headers, timeout=10
+            )
+            response.raise_for_status()
+            return dict(response.json())
+        except (httpx.HTTPError, ValueError) as exc:
+            return {"available": False, "reason": f"isolated checker unavailable: {exc}"}
+
+    def check(self, source: str, target_decl: str, approved_target: str = "") -> LeanCheckResult:
+        content_hash = hashlib.sha256(source.encode()).hexdigest()
+        reasons = self.static_reject_reasons(source, target_decl, approved_target)
+        if reasons:
+            return LeanCheckResult(
+                status="rejected",
+                reasons=reasons,
+                declaration=target_decl,
+                content_hash=content_hash,
+            )
+        try:
+            response = httpx.post(
+                f"{self.service_url}/check",
+                headers=self._headers,
+                json={
+                    "source": source,
+                    "target_decl": target_decl,
+                    "approved_target": approved_target,
+                },
+                timeout=self.timeout_seconds + 10,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            return LeanCheckResult(
+                status=str(payload["status"]),
+                reasons=list(payload.get("reasons", [])),
+                axioms=list(payload.get("axioms", [])),
+                toolchain=str(payload.get("toolchain", "")),
+                log=str(payload.get("log_tail", "")),
+                declaration=str(payload.get("declaration", target_decl)),
+                content_hash=str(payload.get("content_hash", content_hash)),
+            )
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            return LeanCheckResult(
+                status="checker_unavailable",
+                reasons=[f"isolated checker unavailable: {exc}"],
+                declaration=target_decl,
+                content_hash=content_hash,
+            )

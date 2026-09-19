@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     # Lean project used for independent checking. Empty string disables Lean (checker reports
     # "checker_unavailable" rather than pretending to verify).
     lean_project_dir: Path = ROOT / "lean"
+    lean_checker_url: str = ""
+    lean_checker_token: str = ""
     lean_timeout_seconds: int = 300
     allowed_axioms: tuple[str, ...] = ("propext", "Classical.choice", "Quot.sound")
 

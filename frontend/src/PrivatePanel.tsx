@@ -3,7 +3,13 @@ import { PrivateApi, type Attempt, type Campaign, type Portfolio, type Problem, 
 
 const MODES = ["ultra", "fusion", "normal", "fast", "lite"];
 const PROBLEM_STATUSES = ["reported_open", "resolution_claimed", "resolved", "disputed", "unknown"];
-const ROLES = ["hypothesis_generation", "experiment", "critique", "formalization", "status_research"];
+const ROLE_LABELS: Record<string, string> = {
+  hypothesis_generator: "Generate hypotheses",
+  experimenter: "Run an experiment",
+  critic: "Critique ideas",
+  prover_formalizer: "Formalize in Lean",
+  status_researcher: "Research problem status",
+};
 const KEY_STORAGE = "mathlab.apiKey";
 
 interface Props {
@@ -25,7 +31,7 @@ export default function PrivatePanel({ problems, selectedIdeaId, onChanged }: Pr
 
   const [newPortfolio, setNewPortfolio] = useState({ name: "pilot", max: 2 });
   const [newCampaign, setNewCampaign] = useState({ portfolio_id: "", problem_id: "", budget: 6, mode: "ultra" });
-  const [assignment, setAssignment] = useState({ role: "hypothesis_generation", mode: "fusion", group: "pilot-A" });
+  const [assignment, setAssignment] = useState({ role: "hypothesis_generator", mode: "fusion", group: "pilot-A" });
   const [prompt, setPrompt] = useState<string | null>(null);
   const [review, setReview] = useState({ problem_id: "", status: "reported_open", note: "" });
 
@@ -265,8 +271,8 @@ export default function PrivatePanel({ problems, selectedIdeaId, onChanged }: Pr
           <h4>Manual assignment (Fusion/Ultra pilot)</h4>
           <div className="form">
             <select value={assignment.role} onChange={(e) => setAssignment({ ...assignment, role: e.target.value })} aria-label="role">
-              {ROLES.map((r) => (
-                <option key={r}>{r}</option>
+              {(status?.roles ?? Object.keys(ROLE_LABELS)).map((role) => (
+                <option key={role} value={role}>{ROLE_LABELS[role] ?? role}</option>
               ))}
             </select>
             <select value={assignment.mode} onChange={(e) => setAssignment({ ...assignment, mode: e.target.value })} aria-label="mode">

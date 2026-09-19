@@ -2,6 +2,7 @@
 
 from fastapi.testclient import TestClient
 
+from app.services.prompts import ASSIGNMENT_ROLES, ROLE_INSTRUCTIONS
 from tests.conftest import OWNER
 
 PRIVATE_FIELDS = {"prompt", "worker_token_hash", "prompt_hash", "error", "api_key", "usage"}
@@ -152,16 +153,34 @@ def test_selection_archives_and_revival_is_private(client: TestClient) -> None:
     assert len(attempts) <= 8
 
 
-def test_manual_assignment_freezes_mode_and_rejects_bad_mode(client: TestClient) -> None:
+def test_manual_assignment_validates_roles_and_freezes_mode(client: TestClient) -> None:
     campaign_id = _setup_campaign(client, mode="ultra")
+    status = client.get("/private/scheduler/status", headers=OWNER)
+    assert status.status_code == 200
+    assert status.json()["roles"] == list(ASSIGNMENT_ROLES)
+
+    for role in ASSIGNMENT_ROLES:
+        r = client.post(
+            f"/private/campaigns/{campaign_id}/assignments",
+            json={"role": role, "mode": "fusion", "comparison_group": "pilot-A"},
+            headers=OWNER,
+        )
+        assert r.status_code == 200, (role, r.text)
+        assert r.json()["role"] == role
+        assert r.json()["requested_mode"] == "fusion"
+        assert r.json()["comparison_group"] == "pilot-A"
+        prompt = client.get(f"/private/attempts/{r.json()['id']}/prompt", headers=OWNER).json()
+        assert f"ROLE: {role}" in prompt["prompt"]
+        assert ROLE_INSTRUCTIONS[role] in prompt["prompt"]
+
     r = client.post(
         f"/private/campaigns/{campaign_id}/assignments",
-        json={"role": "hypothesis_generator", "mode": "fusion", "comparison_group": "pilot-A"},
+        json={"role": "formalization", "mode": "fusion"},
         headers=OWNER,
     )
-    assert r.status_code == 200, r.text
-    assert r.json()["requested_mode"] == "fusion"
-    assert r.json()["comparison_group"] == "pilot-A"
+    assert r.status_code == 422
+    assert "unknown assignment role" in r.json()["detail"]
+
     r = client.post(
         f"/private/campaigns/{campaign_id}/assignments",
         json={"role": "hypothesis_generator", "mode": "gpt-99"},

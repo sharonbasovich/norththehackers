@@ -3,8 +3,6 @@ Workers can read their assignment context and submit partial output; they cannot
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -45,21 +43,7 @@ def context(attempt: Attempt = Depends(require_worker_attempt)) -> dict:
 
 
 def _lean_environment() -> dict:
-    checker = get_scheduler().ingestor.lean_checker
-    root = checker.project_dir
-    if root is None or not checker.available():
-        return {"available": False}
-
-    def read(path: Path) -> str:
-        return path.read_text() if path.exists() else ""
-
-    return {
-        "available": True,
-        "toolchain": read(root / "lean-toolchain").strip(),
-        "lakefile": read(root / "lakefile.toml"),
-        "MathLab/Basic.lean": read(root / "MathLab" / "Basic.lean"),
-        "allowed_axioms": sorted(checker.allowed_axioms),
-    }
+    return get_scheduler().ingestor.lean_checker.environment()
 
 
 class LeanCheckRequest(BaseModel):

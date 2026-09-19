@@ -13,14 +13,46 @@ services:
       MATHLAB_DEVIN_MAX_ACU_LIMIT: ${MATHLAB_DEVIN_MAX_ACU_LIMIT:-}
       MATHLAB_PUBLIC_BASE_URL: ${MATHLAB_PUBLIC_BASE_URL:-http://localhost:8000}
       MATHLAB_SCHEDULER_ENABLED: ${MATHLAB_SCHEDULER_ENABLED:-false}
-      # Lean is not installed in this image; the checker records checker_unavailable blockers.
       MATHLAB_LEAN_PROJECT_DIR: ""
+      MATHLAB_LEAN_CHECKER_URL: http://lean-checker:8001
+      MATHLAB_LEAN_CHECKER_TOKEN: ${MATHLAB_LEAN_CHECKER_TOKEN:-change-me-checker-key}
       MATHLAB_CORS_ORIGINS: '["http://localhost:5173"]'
     volumes:
       - mathlab-data:/data
+    depends_on:
+      lean-checker:
+        condition: service_healthy
+    networks: [default, checker]
+  lean-checker:
+    build:
+      context: .
+      dockerfile: checker_service/Dockerfile
+    environment:
+      MATHLAB_LEAN_PROJECT_DIR: /srv/lean
+      MATHLAB_LEAN_CHECKER_TOKEN: ${MATHLAB_LEAN_CHECKER_TOKEN:-change-me-checker-key}
+      MATHLAB_LEAN_TIMEOUT_SECONDS: ${MATHLAB_LEAN_TIMEOUT_SECONDS:-300}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=5)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    read_only: true
+    tmpfs:
+      - /srv/lean/.checks:uid=10001,gid=10001,mode=0700
+      - /tmp:uid=10001,gid=10001,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 3g
+    cpus: 2.0
+    networks: [checker]
   frontend:
     build: ./frontend
     ports: ["5173:80"]
     depends_on: [backend]
 volumes:
   mathlab-data:
+networks:
+  checker:
+    internal: true

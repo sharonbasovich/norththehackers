@@ -37,6 +37,7 @@ from ..services.atlas_import import (
 )
 from ..services.devin_client import DEVIN_MODES
 from ..services.events import emit
+from ..services.prompts import ASSIGNMENT_ROLES
 from ..services.publication import withdraw
 from ..services.scheduler import certify_evidence, revive_idea
 
@@ -654,6 +655,7 @@ def scheduler_status(db: Session = Depends(get_db)) -> dict:
         "lean_available": get_scheduler().ingestor.lean_checker.available(),
         "running_attempts": len(running),
         "modes": list(DEVIN_MODES),
+        "roles": list(ASSIGNMENT_ROLES),
     }
 
 
