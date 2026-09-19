@@ -42,6 +42,7 @@ class Candidate:
     critique_refutes: int = 0
     cost: float = 0.0
     duplicate_of: str | None = None
+    transfer_value: int = 0
 
 
 @dataclass
@@ -68,6 +69,7 @@ def score(candidate: Candidate) -> tuple[float, dict[str, float]]:
         else 0.0,
         "cost_penalty": -0.1 * candidate.cost,
         "duplicate_penalty": -3.0 if candidate.duplicate_of else 0.0,
+        "transfer_value": min(3.0, candidate.transfer_value * 0.75),
     }
     return sum(components.values()), components
 
@@ -98,7 +100,7 @@ def select_generation(
             continue
         if candidate.evidence_status == "refuted" or candidate.duplicate_of:
             continue
-        if per_cluster.get(key, 0) < keep_per_cluster:
+        if len(kept) < keep_total and per_cluster.get(key, 0) < keep_per_cluster:
             kept.add(candidate.idea_id)
             per_cluster[key] = per_cluster.get(key, 0) + 1
     for candidate, _total, _ in scored:

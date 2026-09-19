@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
-import { PrivateApi, type Attempt, type Campaign, type Portfolio, type Problem, type SchedulerStatus } from "./api";
+import { PrivateApi, type Attempt, type Campaign, type Portfolio, type Problem, type ResearchPool, type SchedulerStatus } from "./api";
 
 const MODES = ["ultra", "fusion", "normal", "fast", "lite"];
 const PROBLEM_STATUSES = ["reported_open", "resolution_claimed", "resolved", "disputed", "unknown"];
-const ROLES = ["hypothesis_generation", "experiment", "critique", "formalization", "status_research"];
+const ROLES = ["hypothesis_generator", "experimenter", "critic", "prover_formalizer", "status_researcher", "synthesizer"];
 const KEY_STORAGE = "mathlab.apiKey";
 
 interface Props {
@@ -25,7 +25,11 @@ export default function PrivatePanel({ problems, selectedIdeaId, onChanged }: Pr
 
   const [newPortfolio, setNewPortfolio] = useState({ name: "pilot", max: 2 });
   const [newCampaign, setNewCampaign] = useState({ portfolio_id: "", problem_id: "", budget: 6, mode: "ultra" });
-  const [assignment, setAssignment] = useState({ role: "hypothesis_generation", mode: "fusion", group: "pilot-A" });
+  const [assignment, setAssignment] = useState({ role: "hypothesis_generator", mode: "fusion", group: "" });
+  const [poolId, setPoolId] = useState("");
+  const [poolProblems, setPoolProblems] = useState<string[]>([]);
+  const [poolBudget, setPoolBudget] = useState(12);
+  const [pool, setPool] = useState<ResearchPool | null>(null);
   const [prompt, setPrompt] = useState<string | null>(null);
   const [review, setReview] = useState({ problem_id: "", status: "reported_open", note: "" });
 
@@ -36,8 +40,9 @@ export default function PrivatePanel({ problems, selectedIdeaId, onChanged }: Pr
       setPortfolios(p);
       setCampaigns(c);
       if (campaignId) setAttempts(await a.attempts(campaignId));
+      if (poolId) setPool(await a.researchPool(poolId));
     },
-    [campaignId],
+    [campaignId, poolId],
   );
 
   const run = useCallback(
@@ -73,6 +78,15 @@ export default function PrivatePanel({ problems, selectedIdeaId, onChanged }: Pr
   useEffect(() => {
     if (api && campaignId) api.attempts(campaignId).then(setAttempts).catch(() => setAttempts([]));
   }, [api, campaignId]);
+
+  useEffect(() => {
+    setPool(null);
+    if (!api || !poolId) return;
+    let cancelled = false;
+    api.researchPool(poolId).then((value) => { if (!cancelled) setPool(value); })
+      .catch((e) => { if (!cancelled) setMsg((e as Error).message); });
+    return () => { cancelled = true; };
+  }, [api, poolId]);
 
   if (!api) {
     return (
@@ -160,6 +174,36 @@ export default function PrivatePanel({ problems, selectedIdeaId, onChanged }: Pr
         </button>
       </div>
 
+      <h4>Explore a problem set</h4>
+      <p><small>Problems in a portfolio share lemmas, experiments and failed directions. The scheduler explores connections and works on useful shared claims.</small></p>
+      <div className="form">
+        <select aria-label="research pool" value={poolId} onChange={(e) => setPoolId(e.target.value)}>
+          <option value="">choose portfolio…</option>
+          {portfolios.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+        <select multiple size={7} aria-label="problems to explore together" value={poolProblems}
+          onChange={(e) => setPoolProblems(Array.from(e.target.selectedOptions, (o) => o.value))}>
+          {problems.map((p) => <option key={p.id} value={p.id}>{p.title}</option>)}
+        </select>
+        <label>Session allowance per new problem
+          <input type="number" min={1} value={poolBudget} onChange={(e) => setPoolBudget(Number(e.target.value))} />
+        </label>
+        <button disabled={busy || !poolId || !poolProblems.length || poolBudget < 1}
+          onClick={() => run("add problem set", () => api.startResearchPool(poolId, {
+            problem_ids: poolProblems, session_budget_per_problem: poolBudget, default_mode: "ultra",
+          }))}>Add problems to shared research</button>
+      </div>
+      {pool && <div className="card">
+        <b>{pool.problems.length} problems · {pool.total_claims ?? pool.claims.length} shared claims</b>
+        <p><small>Adopted connections are useful research routes. Only claims checked by Lean are formally verified.</small></p>
+        {pool.links.filter((l) => l.kind === "applies_to").slice(-20).map((link) => <div key={link.id} className="card">
+          <small><b>{link.status}</b> · {pool.claims.find((c) => c.id === link.claim)?.statement ?? link.claim}
+            {" → "}{pool.problems.find((p) => p.id === link.target)?.title ?? link.target}</small>
+          <p>{link.reason}</p>
+        </div>)}
+        <small>{pool.failed_directions.length} recorded failed or disputed directions in this view.</small>
+      </div>}
+
       <h4>Problem status review</h4>
       <p>
         <small>
@@ -197,7 +241,7 @@ export default function PrivatePanel({ problems, selectedIdeaId, onChanged }: Pr
           </button>
           <br />
           <small>
-            {c.state} · gen {c.generation} · {c.sessions_used}/{c.session_budget} sessions · {c.ideas} ideas · mode{" "}
+            {c.state} · {c.research_outcome} · gen {c.generation} · {c.sessions_used}/{c.session_budget} sessions · {c.ideas} ideas · mode{" "}
             {String(c.policy.default_mode ?? "ultra")} · policy {c.policy_version}
           </small>
           <div className="toolbar">
@@ -295,6 +339,7 @@ export default function PrivatePanel({ problems, selectedIdeaId, onChanged }: Pr
           <h4>Attempts ({attempts.length})</h4>
           {attempts.map((a) => (
             <div key={a.id} className="card">
+              {a.research_task?.reason && <p>{a.research_task.reason}</p>}
               <small>
                 <b>{a.role}</b> · {a.status}
                 {a.status_detail ? ` (${a.status_detail})` : ""} · requested <b>{a.requested_mode}</b>

@@ -29,6 +29,33 @@ DEVIN_MODES = ("normal", "fast", "lite", "ultra", "fusion")
 RESEARCH_OUTPUT_SCHEMA: dict = {
     "type": "object",
     "properties": {
+        "research_links": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim": {
+                        "type": "string",
+                        "description": "Existing claim ID or new local_id.",
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Problem ID for applies_to; claim ID/local_id otherwise.",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["applies_to", "depends_on", "contradicts", "equivalent_to"],
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["proposed", "adopted", "rejected", "inconclusive"],
+                    },
+                    "reason": {"type": "string"},
+                    "assumptions": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["claim", "target", "kind", "status", "reason"],
+            },
+        },
         "ideas": {
             "type": "array",
             "items": {
@@ -303,6 +330,91 @@ class MockDevinClient:
     def _fake_output(state: dict) -> dict:
         rng = random.Random(state["seed"])
         prompt: str = state["prompt"]
+        role_name = re.search(r"^ROLE: (\w+)$", prompt, re.M)
+        shared_role = role_name.group(1) if role_name else ""
+        if shared_role in {
+            "synthesizer",
+            "connection_reviewer",
+            "lemma_architect",
+            "lemma_prover",
+            "counterexample_hunter",
+            "proof_closer",
+        }:
+            pool = json.loads(
+                prompt.split("SHARED RESEARCH POOL\n", 1)[1].split("\n\nASSIGNMENT", 1)[0]
+            )
+            assignment = json.loads(prompt.split("ASSIGNMENT\n", 1)[1].split("\n\n", 1)[0])
+            shared_output: dict = {
+                "ideas": [],
+                "evidence": [],
+                "research_links": [],
+                "gaps": ["mock provider: no real research"],
+            }
+            focus = next(
+                (c for c in pool["claims"] if c["id"] == assignment.get("focus_claim_id")), None
+            )
+            if shared_role in {"synthesizer", "lemma_architect"}:
+                shared_output["ideas"] = [
+                    {
+                        "local_id": "S1",
+                        "title": "[mock] Shared finite-case lemma",
+                        "approach": "Investigate a reusable finite-case argument across the pool.",
+                        "next_experiment": "Test the shared claim's assumptions on each problem.",
+                        "method_tags": ["shared-reduction"],
+                        "claims": [
+                            {
+                                "local_id": "SC1",
+                                "statement": "[mock] 1 + 1 = 2",
+                                "lean_declaration": "theorem shared_mock_lemma : 1 + 1 = 2",
+                            }
+                        ],
+                    }
+                ]
+                shared_output["research_links"] = [
+                    {
+                        "claim": "SC1",
+                        "target": p["id"],
+                        "kind": "applies_to",
+                        "status": "proposed",
+                        "reason": "[mock] Candidate shared route; untested.",
+                    }
+                    for p in pool["problems"]
+                ]
+            elif shared_role == "connection_reviewer" and focus:
+                shared_output["research_links"] = [
+                    {
+                        "claim": focus["id"],
+                        "target": assignment["target_problem_id"],
+                        "kind": "applies_to",
+                        "status": "adopted",
+                        "reason": "[mock] Retain as a research route, not a proof.",
+                    }
+                ]
+            elif shared_role == "lemma_prover" and focus:
+                declaration = focus["lean_declaration"]
+                proof = "rfl" if declaration.endswith(": 1 + 1 = 2") else "by sorry"
+                shared_output["evidence"] = [
+                    {
+                        "target": focus["id"],
+                        "check_type": "lean_attempt",
+                        "result": "inconclusive",
+                        "summary": "[mock] Shared lemma candidate.",
+                        "artifact": {
+                            "filename": "Shared.lean",
+                            "content": f"{declaration} := {proof}\n",
+                        },
+                    }
+                ]
+            elif shared_role == "counterexample_hunter" and focus:
+                shared_output["evidence"] = [
+                    {
+                        "target": focus["id"],
+                        "check_type": "counterexample_search",
+                        "result": "inconclusive",
+                        "summary": "[mock] Conflict remains unresolved.",
+                    }
+                ]
+            return shared_output
         role = "hypothesis_generator"
         for candidate in ("experimenter", "critic", "prover_formalizer", "hypothesis_generator"):
             if f"ROLE: {candidate}" in prompt:

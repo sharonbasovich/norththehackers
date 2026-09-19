@@ -18,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Campaign, Claim, Event, Evidence, Idea, Problem, Publication, utcnow
+from .research import claim_state
 
 POLICY_VERSION = "v1"
 
@@ -199,16 +200,7 @@ class Publisher:
         claim = db.get(Claim, claim_id)
         if claim is None:
             return None
-        verified = any(e.certified and e.result == "verified" for e in claim.evidence)
-        status = (
-            "lean_verified"
-            if verified
-            else (
-                "lean_formalization_in_progress"
-                if claim.formalization_status in {"in_progress", "queued"}
-                else "untested"
-            )
-        )
+        status = claim_state(claim)
         payload = {
             "id": claim.id,
             "idea_id": claim.idea_id,
@@ -219,6 +211,7 @@ class Publisher:
             "claim_version": claim.version,
             "content_hash": claim.content_hash,
             "formalization_status": claim.formalization_status,
+            "epistemic_status": status,
             "previous_version_id": claim.previous_version_id,
         }
         return payload, evidence_label(status)
@@ -269,6 +262,7 @@ class Publisher:
             "id": campaign.id,
             "problem_id": campaign.problem_id,
             "state": campaign.state,
+            "research_outcome": campaign.research_outcome or "researching",
             "generation": campaign.generation,
             "session_budget": campaign.session_budget,
             "sessions_used": campaign.sessions_used,

@@ -6,6 +6,12 @@ proof attempts as a versioned lineage graph, culls and refines branches generati
 independently checks Lean proofs, and publishes everything automatically with explicit evidence
 labels. The full design is in [`docs/plan.md`](docs/plan.md).
 
+Campaigns in a portfolio now form a **shared research pool**: a synthesizer explores the problem
+set, workers review whether lemmas apply across problems, shared dependencies receive priority,
+and verified lemmas can feed exact-target proof closure. Start a set using **Research controls →
+Explore a problem set**. See [`docs/shared-research.md`](docs/shared-research.md) for the loop,
+evidence rules, budget accounting, API and current limitations.
+
 ```
 frontend/   React + react-force-graph-3d explorer (public browsing + private research controls)
 backend/    FastAPI system of record: atlas, campaigns, scheduler, Devin adapter, Lean checker,

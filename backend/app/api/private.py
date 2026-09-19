@@ -38,6 +38,7 @@ from ..services.atlas_import import (
 from ..services.devin_client import DEVIN_MODES
 from ..services.events import emit
 from ..services.publication import withdraw
+from ..services.research import memory
 from ..services.scheduler import certify_evidence, revive_idea
 
 router = APIRouter(
@@ -72,13 +73,13 @@ class ProblemIn(BaseModel):
 
 class PortfolioIn(BaseModel):
     name: str
-    max_concurrent_sessions: int = 2
+    max_concurrent_sessions: int = Field(default=2, ge=1, le=32)
 
 
 class CampaignIn(BaseModel):
     portfolio_id: str
     problem_id: str
-    session_budget: int = 6
+    session_budget: int = Field(default=6, ge=1)
     default_mode: str = "ultra"
     policy: dict = Field(default_factory=dict)
     seed: int = 0
@@ -89,6 +90,12 @@ class AssignmentIn(BaseModel):
     idea_id: str | None = None
     mode: str | None = None
     comparison_group: str = ""
+
+
+class ResearchPoolIn(BaseModel):
+    problem_ids: list[str] = Field(min_length=1, max_length=200)
+    session_budget_per_problem: int = Field(default=12, ge=1, le=10000)
+    default_mode: str = "ultra"
 
 
 class WikipediaImportIn(BaseModel):
@@ -375,6 +382,62 @@ def create_portfolio(body: PortfolioIn, db: Session = Depends(get_db)) -> dict:
     return {"id": portfolio.id}
 
 
+@router.post("/portfolios/{portfolio_id}/research")
+def start_research_pool(
+    portfolio_id: str, body: ResearchPoolIn, db: Session = Depends(get_db)
+) -> dict:
+    """Add a set of problems to shared exploration without resetting existing budgets."""
+    if db.get(Portfolio, portfolio_id) is None:
+        raise HTTPException(404, "portfolio not found")
+    if body.default_mode not in DEVIN_MODES:
+        raise HTTPException(422, "unknown Devin mode")
+    ids = set(body.problem_ids)
+    problems = list(db.scalars(select(Problem).where(Problem.id.in_(ids))))
+    if len(problems) != len(ids):
+        raise HTTPException(404, "one or more problems not found")
+    existing = list(db.scalars(select(Campaign).where(Campaign.portfolio_id == portfolio_id)))
+    created = []
+    for problem in problems:
+        if any(c.problem_id == problem.id for c in existing):
+            continue
+        campaign = Campaign(
+            portfolio_id=portfolio_id,
+            problem_id=problem.id,
+            session_budget=body.session_budget_per_problem,
+            policy={"default_mode": body.default_mode, "shared_research": True},
+        )
+        db.add(campaign)
+        db.flush()
+        emit(
+            db,
+            "campaign.created",
+            record_type="campaign",
+            record_id=campaign.id,
+            visibility="public",
+        )
+        created.append(campaign.id)
+    db.commit()
+    get_scheduler().publisher.process_outbox(db)
+    return {
+        "portfolio_id": portfolio_id,
+        "created_campaign_ids": created,
+        "note": "Shared tasks use these campaign budgets; existing campaigns are unchanged.",
+    }
+
+
+@router.get("/portfolios/{portfolio_id}/research")
+def research_pool(portfolio_id: str, db: Session = Depends(get_db)) -> dict:
+    if db.get(Portfolio, portfolio_id) is None:
+        raise HTTPException(404, "portfolio not found")
+    campaigns = list(db.scalars(select(Campaign).where(Campaign.portfolio_id == portfolio_id)))
+    campaign = next((c for c in campaigns if c.policy.get("shared_research", True)), None)
+    return (
+        memory(db, campaign, limit=200)
+        if campaign
+        else {"problems": [], "claims": [], "links": [], "failed_directions": []}
+    )
+
+
 @router.post("/portfolios/{portfolio_id}/pause")
 def pause_portfolio(portfolio_id: str, paused: bool = True, db: Session = Depends(get_db)) -> dict:
     portfolio = db.get(Portfolio, portfolio_id)
@@ -417,6 +480,7 @@ def _campaign_view(c: Campaign) -> dict:
         "problem_title": c.problem.title,
         "portfolio_id": c.portfolio_id,
         "state": c.state,
+        "research_outcome": c.research_outcome or "researching",
         "generation": c.generation,
         "session_budget": c.session_budget,
         "sessions_used": c.sessions_used,
@@ -508,6 +572,11 @@ def _attempt_view(a: Attempt) -> dict:
         "campaign_id": a.campaign_id,
         "idea_id": a.idea_id,
         "review_idea_ids": (a.model_metadata or {}).get("review_idea_ids", []),
+        "research_task": {
+            k: v
+            for k, v in (a.model_metadata or {}).items()
+            if k in {"focus_claim_id", "target_problem_id", "reason", "research_task_key"}
+        },
         "role": a.role,
         "requested_mode": a.requested_mode,
         "reported_mode": a.reported_mode,

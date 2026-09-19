@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import threading
 from datetime import timedelta
 
 from sqlalchemy import select
@@ -33,8 +34,9 @@ from ..models import (
 from .devin_client import DEVIN_MODES, DevinClient
 from .events import emit
 from .ingest import Ingestor
-from .prompts import build_prompt
+from .prompts import ROLE_INSTRUCTIONS, build_prompt
 from .publication import Publisher
+from .research import claim_state, frontier, memory, pool_campaigns, pool_claims, pool_relations
 from .selection import Candidate, select_generation
 
 RUNNING = {"queued", "dispatching", "running", "blocked"}
@@ -51,6 +53,8 @@ DEFAULT_POLICY = {
     "promote_top": 2,
     "auto_plan": True,
     "max_retries": 2,
+    "parallel_branches": 2,
+    "shared_research": True,
 }
 
 
@@ -71,15 +75,45 @@ class Scheduler:
         self.client = client
         self.ingestor = ingestor
         self.publisher = publisher
+        self._tick_lock = threading.Lock()
 
     # -- public entry point --------------------------------------------------------------------
 
     def tick(self, db: Session) -> dict:
+        # The manual endpoint and background loop share this scheduler. Do not dispatch
+        # the same queued work twice when both tick at once in the supported single process.
+        with self._tick_lock:
+            return self._tick(db)
+
+    def _tick(self, db: Session) -> dict:
         summary = {"reconciled": 0, "planned": 0, "dispatched": 0, "selected": 0, "published": 0}
         summary["reconciled"] = self.reconcile(db)
+        for portfolio in db.scalars(select(Portfolio).where(Portfolio.paused.is_(False))):
+            campaigns = list(
+                db.scalars(select(Campaign).where(Campaign.portfolio_id == portfolio.id))
+            )
+            shared = [c for c in campaigns if policy_of(c)["shared_research"]]
+            for task in frontier(db, shared):
+                if not self._has_slot(db, task.campaign):
+                    continue
+                self.enqueue(
+                    db,
+                    task.campaign,
+                    role=task.role,
+                    idea=None,
+                    parents=[],
+                    mode=mode_for_role(policy_of(task.campaign), task.role),
+                    metadata={
+                        **task.metadata,
+                        "research_task_key": task.key,
+                        "priority": task.priority,
+                    },
+                )
+                summary["planned"] += 1
+                break  # retain capacity for branch exploration on every tick
         for campaign in db.scalars(select(Campaign).where(Campaign.state == "active")):
-            portfolio = db.get(Portfolio, campaign.portfolio_id)
-            if portfolio is None or portfolio.paused:
+            owning_portfolio = db.get(Portfolio, campaign.portfolio_id)
+            if owning_portfolio is None or owning_portfolio.paused:
                 continue
             summary["planned"] += self.plan(db, campaign)
         summary["dispatched"] = self.dispatch(db)
@@ -166,6 +200,13 @@ class Scheduler:
         policy = policy_of(campaign)
         if not policy["auto_plan"]:
             return 0
+        if campaign.research_outcome == "proven":
+            for pending in self._open_attempts(db, campaign):
+                if pending.status == "queued":
+                    pending.status = "cancelled"
+            if not self._open_attempts(db, campaign):
+                campaign.state = "completed"
+            return 0
         if campaign.problem.status in {"resolution_claimed", "resolved"}:
             if not self._open_attempts(db, campaign):
                 campaign.state = "paused"
@@ -179,9 +220,30 @@ class Scheduler:
                 )
             return 0
         if campaign.sessions_used >= campaign.session_budget:
+            for pending in self._open_attempts(db, campaign):
+                if pending.status == "queued":
+                    pending.status = "cancelled"
+                    pending.error = "Campaign session budget exhausted before dispatch"
             open_attempts = self._open_attempts(db, campaign)
             if not open_attempts:
                 campaign.state = "completed"
+                shared_claims = pool_claims(db, pool_campaigns(db, campaign))
+                useful = {
+                    r.source_id
+                    for r in pool_relations(db, shared_claims, pool_campaigns(db, campaign))
+                    if r.kind == "applies_to"
+                    and r.status == "adopted"
+                    and r.target_id == campaign.problem_id
+                }
+                campaign.research_outcome = (
+                    "unresolved_with_progress"
+                    if any(
+                        claim_state(c) == "lean_verified"
+                        and (c.campaign_id == campaign.id or c.id in useful)
+                        for c in shared_claims
+                    )
+                    else "unresolved"
+                )
                 emit(
                     db,
                     "campaign.completed",
@@ -192,14 +254,27 @@ class Scheduler:
                 )
             return 0
         open_attempts = self._open_attempts(db, campaign)
-        if open_attempts:
-            return 0  # one assignment in flight per campaign keeps sessions bounded
+        if not self._has_slot(db, campaign):
+            return 0
+        if any(a.role in {"hypothesis_generator", "synthesizer"} for a in open_attempts):
+            return 0
         active = [
             i
             for i in campaign.ideas
             if i.scheduling_status in {"active", "promoted"} and i.generation == campaign.generation
         ]
+        shared_ids = [c.id for c in pool_campaigns(db, campaign)]
+        busy_shared_claims = {
+            (a.model_metadata or {}).get("focus_claim_id")
+            for a in db.scalars(
+                select(Attempt).where(
+                    Attempt.campaign_id.in_(shared_ids), Attempt.status.in_(RUNNING)
+                )
+            )
+        } - {None}
         if not active:
+            if open_attempts:
+                return 0
             parents = [i for i in campaign.ideas if i.scheduling_status == "promoted"]
             if not parents:
                 # Nothing earned promotion: refine the best surviving (unrefuted) ideas rather
@@ -215,7 +290,9 @@ class Scheduler:
             # Survivors of a cull are deepened first: a formalizer tries to land a Lean-verified
             # piece of each promoted idea before the next generation branches from them.
             for idea in sorted(parents, key=lambda i: (i.pinned is False, -i.score)):
-                if self._wants_formalizer(idea):
+                if self._wants_formalizer(idea) and not any(
+                    c.id in busy_shared_claims for c in idea.claims
+                ):
                     self.enqueue(
                         db,
                         campaign,
@@ -234,8 +311,15 @@ class Scheduler:
                 mode=policy["default_mode"],
             )
             return 1
-        ranked = sorted(active, key=lambda i: (i.pinned is False, -i.score))
-        next_roles = [(idea, self._next_role(idea)) for idea in ranked]
+        ranked = sorted(
+            (i for i in active if not any(c.id in busy_shared_claims for c in i.claims)),
+            key=lambda i: (i.pinned is False, -i.score),
+        )
+        busy = {a.idea_id for a in open_attempts}
+        busy.update(
+            i for a in open_attempts for i in (a.model_metadata or {}).get("review_idea_ids", [])
+        )
+        next_roles = [(idea, self._next_role(idea)) for idea in ranked if idea.id not in busy]
         # Critiques wait until the generation's other work is done and then run as one
         # session over every idea; culling needs all of them critiqued, and per-idea critic
         # sessions would spend the budget before that point.
@@ -251,6 +335,8 @@ class Scheduler:
                 )
                 return 1
         needing_critique = [idea for idea, role in next_roles if role == "critic"]
+        if open_attempts:
+            return 0  # critique the generation after its concurrent experiments finish
         if len(needing_critique) > 1:
             self.enqueue(
                 db,
@@ -320,6 +406,16 @@ class Scheduler:
             ).all()
         )
 
+    def _has_slot(self, db: Session, campaign: Campaign) -> bool:
+        pending = self._open_attempts(db, campaign)
+        return (
+            campaign.state == "active"
+            and campaign.research_outcome != "proven"
+            and len(pending) < max(1, int(policy_of(campaign)["parallel_branches"]))
+            and campaign.sessions_used + sum(a.status == "queued" for a in pending)
+            < campaign.session_budget
+        )
+
     def enqueue(
         self,
         db: Session,
@@ -331,9 +427,20 @@ class Scheduler:
         mode: str,
         comparison_group: str = "",
         review: list[Idea] | None = None,
+        metadata: dict | None = None,
     ) -> Attempt:
         if mode not in DEVIN_MODES:
             raise ValueError(f"unknown devin mode {mode!r}")
+        aliases = {
+            "hypothesis_generation": "hypothesis_generator",
+            "experiment": "experimenter",
+            "critique": "critic",
+            "formalization": "prover_formalizer",
+            "status_research": "status_researcher",
+        }
+        role = aliases.get(role, role)
+        if role not in ROLE_INSTRUCTIONS:
+            raise ValueError(f"unknown research role {role!r}")
         review = review or []
         attempt = Attempt(
             campaign_id=campaign.id,
@@ -346,6 +453,7 @@ class Scheduler:
             model_metadata={
                 "parent_idea_ids": [p.id for p in parents[:6]],
                 "review_idea_ids": [r.id for r in review],
+                **(metadata or {}),
             },
         )
         db.add(attempt)
@@ -361,6 +469,12 @@ class Scheduler:
             worker_api_base=self.settings.public_base_url,
             idea=idea,
             review=review,
+            research_context=memory(
+                db,
+                campaign,
+                isolated=bool(comparison_group),
+                focus_claim_id=(metadata or {}).get("focus_claim_id"),
+            ),
         )
         attempt.prompt_hash = hashlib.sha256(attempt.prompt.encode()).hexdigest()
         emit(
@@ -397,7 +511,37 @@ class Scheduler:
                 .where(Attempt.campaign_id.in_(campaign_ids), Attempt.status == "queued")
                 .order_by(Attempt.created_at)
             ).all()
-            for attempt in queued[:capacity]:
+            eligible = [
+                a
+                for a in queued
+                if a.campaign.state == "active"
+                and a.campaign.research_outcome != "proven"
+                and a.campaign.sessions_used < a.campaign.session_budget
+                and a.campaign.problem.status not in {"resolution_claimed", "resolved"}
+            ]
+            for _ in range(capacity):
+                if not eligible:
+                    break
+                # Every third allocation protects exploration. Remaining slots favor
+                # contradictions, proof closure and lemmas with multiple beneficiaries.
+                allocations = sum(
+                    c.sessions_used
+                    for c in db.scalars(select(Campaign).where(Campaign.id.in_(campaign_ids)))
+                )
+                exploration = [
+                    a for a in eligible if a.role in {"hypothesis_generator", "synthesizer"}
+                ]
+                choices = exploration if allocations % 3 == 2 and exploration else eligible
+                attempt = min(
+                    choices,
+                    key=lambda a: (
+                        -float((a.model_metadata or {}).get("priority", 40))
+                        - min(60, (utcnow() - a.created_at).total_seconds() / 30),
+                        a.campaign.sessions_used,
+                        a.created_at,
+                    ),
+                )
+                eligible.remove(attempt)
                 campaign = db.get(Campaign, attempt.campaign_id)
                 if campaign is None or campaign.state != "active":
                     continue
@@ -504,12 +648,26 @@ class Scheduler:
             return 0  # generation still has cheap informative work
         policy = policy_of(campaign)
         candidates = []
+        campaigns = pool_campaigns(db, campaign)
+        claims = pool_claims(db, campaigns)
+        links = pool_relations(db, claims, campaigns)
         for idea in current:
             critiques = [e for e in idea.evidence if e.check_type == "critique"]
             cost = sum(
                 float((a.usage or {}).get("acus_consumed", 0.0))
                 for a in campaign.attempts
                 if a.idea_id == idea.id
+            )
+            idea_claim_ids = {c.id for c in idea.claims}
+            transfer_value = len(
+                {
+                    r.target_id
+                    for r in links
+                    if r.kind == "applies_to"
+                    and r.status == "adopted"
+                    and r.source_id in idea_claim_ids
+                    and r.target_id != campaign.problem_id
+                }
             )
             candidates.append(
                 Candidate(
@@ -525,6 +683,7 @@ class Scheduler:
                     critique_refutes=sum(1 for e in critiques if e.result == "refutes"),
                     cost=cost,
                     duplicate_of=_duplicate_of(idea, current),
+                    transfer_value=transfer_value,
                 )
             )
         decisions = select_generation(

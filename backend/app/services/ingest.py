@@ -11,12 +11,14 @@ import hashlib
 import re
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Attempt, Campaign, Claim, Evidence, Idea, IdeaParent, Relation, utcnow
 from .artifacts import store_artifact
 from .events import emit
 from .lean_checker import LeanChecker, normalize
+from .research import claim_state, ingest_links, scope_ids
 
 WORKER_STATUS_MAP: dict[tuple[str, str], str] = {
     ("counterexample_search", "supports"): "counterexample_checked",
@@ -59,6 +61,8 @@ def stronger(current: str, proposed: str) -> str:
         return current
     if proposed in {"refuted", "lean_verified"}:
         return proposed
+    if proposed == "unresolved_conflict" or current == "unresolved_conflict":
+        return "unresolved_conflict"
     return proposed if STRENGTH.index(proposed) > STRENGTH.index(current) else current
 
 
@@ -98,12 +102,15 @@ class Ingestor:
             created["evidence"] += outcome[0]
             created["lean_checks"] += outcome[1]
 
+        rejected_links = ingest_links(db, attempt, output, id_map)
+
         if not partial:
             attempt.result = {
                 "gaps": output.get("gaps", []),
                 "self_reported_models": output.get("self_reported_models", ""),
                 "counts": created,
                 "unattached_evidence": unattached,
+                "rejected_research_links": rejected_links,
                 "raw": output,
             }
             attempt.result_ingested = True
@@ -114,6 +121,7 @@ class Ingestor:
             record_id=attempt.id,
             payload={"campaign_id": campaign.id, "counts": created, "partial": partial},
         )
+        db.expire(campaign, ["ideas"])
         return created
 
     @staticmethod
@@ -151,7 +159,7 @@ class Ingestor:
         parents = [
             p
             for p in (db.get(Idea, pid) for pid in parent_ids)
-            if p is not None and p.campaign_id == campaign.id
+            if p is not None and p.campaign_id in scope_ids(db, attempt)
         ]
         if not parents and attempt.idea_id:
             assigned = db.get(Idea, attempt.idea_id)
@@ -163,7 +171,7 @@ class Ingestor:
             parents = [
                 p
                 for p in (db.get(Idea, pid) for pid in assigned_ids)
-                if p is not None and p.campaign_id == campaign.id
+                if p is not None and p.campaign_id in scope_ids(db, attempt)
             ]
         idea = Idea(
             campaign_id=campaign.id,
@@ -276,10 +284,10 @@ class Ingestor:
             if claim is not None:
                 return claim.idea, claim
         idea = db.get(Idea, target)
-        if idea is not None and idea.campaign_id == attempt.campaign_id:
+        if idea is not None and idea.campaign_id in scope_ids(db, attempt):
             return idea, None
         claim = db.get(Claim, target)
-        if claim is not None and claim.campaign_id == attempt.campaign_id:
+        if claim is not None and claim.campaign_id in scope_ids(db, attempt):
             return claim.idea, claim
         return None, None
 
@@ -392,6 +400,21 @@ class Ingestor:
             lean_checks = self._run_lean_check(
                 db, attempt, claim, idea, str(artifact_raw["content"]), artifact.id
             )
+        if claim is not None:
+            db.expire(claim, ["evidence"])
+            emit(db, "claim.evidence_updated", record_type="claim", record_id=claim.id)
+        if idea is not None:
+            db.expire(idea, ["claims", "evidence"])
+            # A verified sublemma does not certify the entire approach or its other claims.
+            if idea.claims and all(claim_state(c) == "lean_verified" for c in idea.claims):
+                idea.evidence_status = "lean_verified"
+                idea.formalization_status = "complete"
+            elif any(claim_state(c) == "unresolved_conflict" for c in idea.claims):
+                idea.evidence_status = "unresolved_conflict"
+            elif idea.evidence_status == "lean_verified":
+                idea.evidence_status = "lean_formalization_in_progress"
+                idea.formalization_status = "in_progress"
+            emit(db, "idea.evidence_updated", record_type="idea", record_id=idea.id)
         return 1, lean_checks
 
     def _run_lean_check(
@@ -444,20 +467,43 @@ class Ingestor:
         if verified:
             claim.formalization_status = "complete"
             if idea is not None:
-                idea.evidence_status = "lean_verified"
-                idea.formalization_status = "complete"
-                db.add(
-                    Relation(
-                        layer="dependency",
-                        kind="proves",
-                        source_type="idea",
-                        source_id=idea.id,
-                        target_type="claim",
-                        target_id=claim.id,
-                        status="checked",
-                        provenance={"evidence_id": check.id},
+                existing_proof = db.scalar(
+                    select(Relation).where(
+                        Relation.kind == "proves",
+                        Relation.source_id == idea.id,
+                        Relation.target_id == claim.id,
                     )
                 )
+                if existing_proof is None:
+                    db.add(
+                        Relation(
+                            layer="dependency",
+                            kind="proves",
+                            source_type="idea",
+                            source_id=idea.id,
+                            target_type="claim",
+                            target_id=claim.id,
+                            status="checked",
+                            provenance={"evidence_id": check.id},
+                        )
+                    )
+            # A proof of a sublemma never completes a problem. Match the immutable target
+            # declaration for each beneficiary; research outcome is separate from source status.
+            for beneficiary in db.scalars(
+                select(Campaign).where(Campaign.id.in_(scope_ids(db, attempt)))
+            ):
+                if beneficiary.problem.formal_target and normalize(
+                    claim.lean_declaration
+                ) == normalize(beneficiary.problem.formal_target):
+                    beneficiary.research_outcome = "proven"
+                    emit(
+                        db,
+                        "research.target_proven",
+                        record_type="campaign",
+                        record_id=beneficiary.id,
+                        payload={"claim_id": claim.id, "evidence_id": check.id},
+                        visibility="public",
+                    )
         elif outcome.status == "rejected":
             claim.formalization_status = "blocked"
             if idea is not None and idea.formalization_status != "complete":

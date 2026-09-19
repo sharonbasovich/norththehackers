@@ -3,9 +3,52 @@ problem and assumptions, and says what may and may not be claimed."""
 
 from __future__ import annotations
 
+import json
+
 from ..models import Attempt, Campaign, Idea, Problem
 
 ROLE_INSTRUCTIONS: dict[str, str] = {
+    "synthesizer": (
+        "Explore the SHARED RESEARCH POOL as a set of related problems. Propose structurally "
+        "different approaches and reusable lemmas, including connections across subject areas. "
+        "Combine surviving ideas, learn from failed directions, and identify common bottlenecks. "
+        "Return research_links from each useful claim to ALL problems it could help (applies_to). "
+        "Record depends_on links between claims and explain assumptions. New links are proposed; "
+        "do not claim that resemblance establishes applicability or truth."
+    ),
+    "connection_reviewer": (
+        "Test the focused claim against its target problem. Inspect scope, quantifiers, "
+        "assumptions and recorded evidence. Return an applies_to research_link: adopted if it "
+        "provides a concrete useful route, rejected if it does not apply, inconclusive if unclear. "
+        "Explain the mapping and every missing assumption. Adoption is a research decision, not "
+        "a proof. If a weaker/stronger lemma is needed, propose it and its depends_on links."
+    ),
+    "lemma_architect": (
+        "Develop the focused shared lemma into a precise, faithful Lean statement and dependency "
+        "skeleton. Return new claims for revised statements, with applies_to links for every "
+        "beneficiary problem and depends_on links for remaining obligations. Preserve scope; "
+        "do not replace a difficult claim with an unrelated easy theorem."
+    ),
+    "lemma_prover": (
+        "Prove the focused shared claim's exact lean_declaration. Retrieve its verified dependency "
+        "artifacts from the worker API and compose a self-contained Lean file. Submit lean_attempt "
+        "evidence targeting the existing claim ID. Use the lab dry-run checker to iterate. If "
+        "blocked, retain the failed attempt and propose precise missing lemmas/dependencies. "
+        "Never change the existing statement or infer proof from an adopted application."
+    ),
+    "counterexample_hunter": (
+        "Attack the focused claim and reconcile its conflicting evidence. Search small cases and "
+        "check assumptions. Return reproducible code, coverage and counterexample_search evidence "
+        "targeting that claim ID. A failed search is not a proof. If a counterexample suggests a "
+        "repaired lemma, propose it separately and identify which problems it could help."
+    ),
+    "proof_closer": (
+        "Use verified shared lemmas to prove the anchor problem's exact formal_target. "
+        "Retrieve proof artifacts, check every assumption and assemble one self-contained Lean "
+        "file. Return a claim with that exact declaration and lean_attempt evidence for it. "
+        "If closure fails, record the gaps and new dependency claims; exploration will continue. "
+        "An unverified dependency must be proved in the final file, never assumed as an axiom."
+    ),
     "hypothesis_generator": (
         "Produce 3 to 5 genuinely distinct approaches to the problem. For each: the approach, the "
         "mechanism that would make it work, the single lemma or computation whose failure would "
@@ -62,6 +105,11 @@ def describe_idea(idea: Idea) -> str:
         lines.append(f"  claim {claim.id} (v{claim.version}): {claim.statement}")
         if claim.lean_declaration:
             lines.append(f"    approved Lean target: {claim.lean_declaration}")
+    for evidence in idea.evidence[-5:]:
+        lines.append(
+            f"  evidence ({evidence.check_type}, {evidence.result}, "
+            f"certified={evidence.certified}): {evidence.summary[:1500]}"
+        )
     return "\n".join(lines)
 
 
@@ -75,6 +123,7 @@ def build_prompt(
     worker_api_base: str,
     idea: Idea | None = None,
     review: list[Idea] | None = None,
+    research_context: dict | None = None,
 ) -> str:
     sources = (
         "\n".join(
@@ -101,6 +150,9 @@ def build_prompt(
     ]
     if problem.formal_target:
         sections.append(f"approved formal target:\n{problem.formal_target}")
+    if research_context:
+        sections.append("SHARED RESEARCH POOL\n" + json.dumps(research_context, ensure_ascii=False))
+        sections.append("ASSIGNMENT\n" + json.dumps(attempt.model_metadata, ensure_ascii=False))
     reference = problem.coverage.get("reference_formalization")
     if reference:
         sections.append(
@@ -134,6 +186,9 @@ def build_prompt(
         "lab's independent checker assigns those labels.",
         "- Distinguish known results (cite them) from your own reasoning.",
         "- Return reproducible artifacts (code, data, Lean files) inline in the structured output.",
+        "- Reuse relevant shared claims and failures. Unverified claims are hypotheses, not facts. "
+        "Use research_links to record applies_to, depends_on, contradicts and equivalent_to. "
+        "Explain adoption/rejection; do not silently discard an unsuccessful connection.",
         "- Fill `gaps` with what remains unresolved. Empty gaps on an open problem is a red flag.",
         "- Leave `self_reported_models` empty unless your environment explicitly states the model.",
         "- Give every new idea and claim a `local_id` (I1, I2, C1, ...) and point each evidence "
@@ -143,6 +198,10 @@ def build_prompt(
         "Call provide_structured_output with the required schema (ideas, evidence, gaps).",
         f"Lab worker API (header X-Worker-Token = the LAB_WORKER_TOKEN session secret): "
         f"GET {worker_api_base}/worker/attempts/{attempt.id}/context for the assignment; "
+        f"GET {worker_api_base}/worker/attempts/{attempt.id}/artifacts/<artifact_id> "
+        "for shared proof or experiment source; "
+        f"GET {worker_api_base}/worker/attempts/{attempt.id}/claims/<claim_id> "
+        "for a specific claim and its dependencies if omitted from the bounded context; "
         f"POST {worker_api_base}/worker/attempts/{attempt.id}/lean-check with JSON "
         '{"source": <full .lean file>, "declaration": <theorem line>} to dry-run the checker; '
         f"POST {worker_api_base}/worker/attempts/{attempt.id}/submit with the deliverable JSON "

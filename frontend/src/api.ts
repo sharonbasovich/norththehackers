@@ -165,6 +165,7 @@ export interface Campaign {
   problem_title: string;
   portfolio_id: string;
   state: string;
+  research_outcome: string;
   generation: number;
   session_budget: number;
   sessions_used: number;
@@ -190,7 +191,16 @@ export interface Attempt {
   error: string;
   retries: number;
   comparison_group: string;
+  research_task?: { reason?: string; focus_claim_id?: string; target_problem_id?: string };
   created_at: string;
+}
+
+export interface ResearchPool {
+  problems: { id: string; title: string }[];
+  claims: { id: string; statement: string; state: string; scope: string }[];
+  links: { id: string; claim: string; target: string; kind: string; status: string; reason: string }[];
+  failed_directions: { id: string; title: string; state: string }[];
+  total_claims?: number;
 }
 
 export interface SchedulerStatus {
@@ -254,6 +264,10 @@ export class PrivateApi {
     this.send<{ id: string }>("POST", "/private/portfolios", { name, max_concurrent_sessions });
   pausePortfolio = (id: string, paused: boolean) =>
     this.send<{ paused: boolean }>("POST", `/private/portfolios/${id}/pause?paused=${paused}`);
+  researchPool = (id: string) => this.send<ResearchPool>("GET", `/private/portfolios/${id}/research`);
+  startResearchPool = (id: string, body: {
+    problem_ids: string[]; session_budget_per_problem: number; default_mode: string;
+  }) => this.send<{ created_campaign_ids: string[] }>("POST", `/private/portfolios/${id}/research`, body);
   campaigns = () => this.send<Campaign[]>("GET", "/private/campaigns");
   createCampaign = (body: {
     portfolio_id: string;

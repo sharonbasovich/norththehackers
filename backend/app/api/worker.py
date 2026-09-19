@@ -7,21 +7,26 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..auth import require_worker_attempt
 from ..db import get_db
 from ..deps import get_scheduler
-from ..models import Attempt
+from ..models import Artifact, Attempt, Claim, Evidence, Idea
+from ..services.artifacts import read_artifact
 from ..services.devin_client import RESEARCH_OUTPUT_SCHEMA
 from ..services.ingest import declaration_name, declaration_signature
 from ..services.prompts import describe_idea
+from ..services.research import memory, scope_ids
 
 router = APIRouter(prefix="/worker", tags=["worker"])
 
 
 @router.get("/attempts/{attempt_id}/context")
-def context(attempt: Attempt = Depends(require_worker_attempt)) -> dict:
+def context(
+    attempt: Attempt = Depends(require_worker_attempt), db: Session = Depends(get_db)
+) -> dict:
     campaign = attempt.campaign
     return {
         "attempt_id": attempt.id,
@@ -40,7 +45,54 @@ def context(attempt: Attempt = Depends(require_worker_attempt)) -> dict:
             if i.scheduling_status in {"active", "promoted"}
         ],
         "output_schema": RESEARCH_OUTPUT_SCHEMA,
+        "assignment": attempt.model_metadata,
+        "research_pool": memory(
+            db,
+            campaign,
+            isolated=bool(attempt.comparison_group),
+            focus_claim_id=(attempt.model_metadata or {}).get("focus_claim_id"),
+        ),
         "lean": _lean_environment(),
+    }
+
+
+@router.get("/attempts/{attempt_id}/artifacts/{artifact_id}")
+def shared_artifact(
+    artifact_id: str,
+    attempt: Attempt = Depends(require_worker_attempt),
+    db: Session = Depends(get_db),
+) -> dict:
+    allowed = scope_ids(db, attempt)
+    artifact = db.get(Artifact, artifact_id)
+    authorized = False
+    for evidence in db.scalars(select(Evidence).where(Evidence.artifact_id == artifact_id)):
+        claim = db.get(Claim, evidence.claim_id) if evidence.claim_id else None
+        idea = db.get(Idea, evidence.idea_id) if evidence.idea_id else None
+        if (claim and claim.campaign_id in allowed) or (idea and idea.campaign_id in allowed):
+            authorized = True
+    if artifact is None or not authorized:
+        raise HTTPException(404, "artifact not in this research pool")
+    return {
+        "id": artifact.id,
+        "filename": artifact.filename,
+        "content_hash": artifact.content_hash,
+        "content": read_artifact(artifact),
+    }
+
+
+@router.get("/attempts/{attempt_id}/claims/{claim_id}")
+def shared_claim(
+    claim_id: str, attempt: Attempt = Depends(require_worker_attempt), db: Session = Depends(get_db)
+) -> dict:
+    claim = db.get(Claim, claim_id)
+    if claim is None or claim.campaign_id not in scope_ids(db, attempt):
+        raise HTTPException(404, "claim not in this research pool")
+    context = memory(
+        db, attempt.campaign, isolated=bool(attempt.comparison_group), focus_claim_id=claim.id
+    )
+    return {
+        "claim": next(c for c in context["claims"] if c["id"] == claim.id),
+        "links": context["links"],
     }
 
 

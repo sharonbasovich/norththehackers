@@ -148,6 +148,9 @@ class Campaign(Base):
         String(20), default="active"
     )  # active|paused|completed|failed
     generation: Mapped[int] = mapped_column(Integer, default=0)
+    research_outcome: Mapped[str | None] = mapped_column(
+        String(40), nullable=True, default="researching"
+    )
     session_budget: Mapped[int] = mapped_column(Integer, default=6)
     sessions_used: Mapped[int] = mapped_column(Integer, default=0)
     policy_version: Mapped[str] = mapped_column(String(40), default="v1")
