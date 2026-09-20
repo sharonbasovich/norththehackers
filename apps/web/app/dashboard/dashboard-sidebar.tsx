@@ -2,7 +2,6 @@
 
 import {
   IconBook2,
-  IconGraph,
   IconHome2,
   IconArrowLeft,
 } from "@tabler/icons-react";
@@ -16,7 +15,6 @@ import {
 
 const links = [
   { label: "Overview", href: "/dashboard", icon: <IconHome2 size={20} /> },
-  { label: "Research graph", href: "/dashboard/graph", icon: <IconGraph size={20} /> },
   { label: "Literature", href: "/dashboard/literature", icon: <IconBook2 size={20} /> },
 ];
 

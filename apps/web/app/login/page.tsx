@@ -35,7 +35,24 @@ export default function LoginPage() {
                 id="email"
                 name="email"
                 type="email"
+                autoComplete="email"
                 placeholder="name@example.com"
+                required
+                className="h-12 w-full rounded-md border border-black/15 bg-white px-4 text-sm outline-none transition-colors placeholder:text-black/35 focus:border-black focus:ring-1 focus:ring-black"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label htmlFor="password" className="text-sm font-medium">
+                Password
+              </label>
+              <input
+                id="password"
+                name="password"
+                type="password"
+                autoComplete="current-password"
+                placeholder="Enter your password"
+                required
                 className="h-12 w-full rounded-md border border-black/15 bg-white px-4 text-sm outline-none transition-colors placeholder:text-black/35 focus:border-black focus:ring-1 focus:ring-black"
               />
             </div>
@@ -44,13 +61,19 @@ export default function LoginPage() {
               type="submit"
               className="h-12 w-full rounded-md bg-black text-sm font-medium text-white transition-colors hover:bg-black/75"
             >
-              Sign in with email
+              Sign in
             </button>
 
           </form>
 
-          <p className="mt-6 text-center text-xs text-black/35">
-            Demo login · Any email will work
+          <p className="mt-6 text-center text-sm text-black/50">
+            Don&apos;t have an account?{" "}
+            <button
+              type="button"
+              className="font-medium text-black underline underline-offset-4 transition-opacity hover:opacity-60"
+            >
+              Create account
+            </button>
           </p>
         </div>
       </section>

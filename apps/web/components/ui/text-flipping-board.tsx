@@ -124,11 +124,11 @@ const FlapCell = React.memo(function FlapCell({
 
   const textCx =
     "absolute inset-x-0 flex select-none items-center justify-center font-mono font-bold tracking-wide";
-  const topBg = accent?.top ?? "bg-neutral-200/80 dark:bg-neutral-900";
-  const bottomBg = accent?.bottom ?? "bg-neutral-200/80 dark:bg-neutral-900";
+  const topBg = accent?.top ?? "bg-white dark:bg-neutral-900";
+  const bottomBg = accent?.bottom ?? "bg-white dark:bg-neutral-900";
   const textColor = accent?.text ?? "text-neutral-800 dark:text-white";
 
-  const flapTopBg = prevAccent?.top ?? "bg-neutral-100 dark:bg-neutral-800";
+  const flapTopBg = prevAccent?.top ?? "bg-neutral-50 dark:bg-neutral-800";
   const flapTextColor = prevAccent?.text ?? "text-neutral-800 dark:text-white";
 
   const bottomDelay = flipDuration * 0.5;
@@ -139,14 +139,20 @@ const FlapCell = React.memo(function FlapCell({
       <div className="relative flex-1 perspective-dramatic transform-3d">
         <div className="absolute inset-0 z-40 hidden flex-row items-center justify-center md:flex">
           <div className="h-1/2 w-px rounded-tr-sm rounded-br-sm bg-neutral-300 dark:bg-black" />
-          <div className="flex h-px flex-1 bg-neutral-300 dark:bg-black" />
+          <div
+            className={cn(
+              "flex h-px flex-1",
+              target === " " && "bg-neutral-300 dark:bg-black",
+            )}
+          />
           <div className="h-1/2 w-px rounded-tl-sm rounded-bl-sm bg-neutral-300 dark:bg-black" />
         </div>
 
         {/* Static top – new character top half */}
         <div
           className={cn(
-            "absolute inset-x-0 top-0 h-[calc(50%-0.5px)] overflow-hidden rounded-t-[3px]",
+            "absolute inset-x-0 top-0 overflow-hidden rounded-t-[3px]",
+            target === " " ? "h-[calc(50%-0.5px)]" : "h-1/2",
             topBg,
           )}
         >
@@ -161,7 +167,8 @@ const FlapCell = React.memo(function FlapCell({
         {/* Static bottom – new character bottom half */}
         <div
           className={cn(
-            "absolute inset-x-0 bottom-0 h-[calc(50%-0.5px)] overflow-hidden rounded-b-[3px]",
+            "absolute inset-x-0 bottom-0 overflow-hidden rounded-b-[3px]",
+            target === " " ? "h-[calc(50%-0.5px)]" : "h-1/2",
             bottomBg,
           )}
         >
@@ -187,7 +194,8 @@ const FlapCell = React.memo(function FlapCell({
           <motion.div
             key={flipId}
             className={cn(
-              "absolute inset-x-0 top-0 z-10 h-[calc(50%-0.5px)] origin-bottom overflow-hidden rounded-t-[3px] backface-hidden transform-3d",
+              "absolute inset-x-0 top-0 z-10 origin-bottom overflow-hidden rounded-t-[3px] backface-hidden transform-3d",
+              target === " " ? "h-[calc(50%-0.5px)]" : "h-1/2",
               flapTopBg,
             )}
             initial={{ rotateX: 0 }}
@@ -217,7 +225,8 @@ const FlapCell = React.memo(function FlapCell({
           <motion.div
             key={`b${flipId}`}
             className={cn(
-              "absolute inset-x-0 bottom-0 z-10 h-[calc(50%-0.5px)] origin-top overflow-hidden rounded-b-[3px] backface-hidden transform-3d",
+              "absolute inset-x-0 bottom-0 z-10 origin-top overflow-hidden rounded-b-[3px] backface-hidden transform-3d",
+              target === " " ? "h-[calc(50%-0.5px)]" : "h-1/2",
               bottomBg,
             )}
             initial={{ rotateX: 90 }}
@@ -246,8 +255,10 @@ const FlapCell = React.memo(function FlapCell({
           </motion.div>
         )}
 
-        {/* Split line */}
-        <div className="pointer-events-none absolute inset-x-0 top-1/2 z-20 h-px -translate-y-[0.5px] bg-neutral-400/50 dark:bg-black/50" />
+        {/* Keep the split line on blank tiles, but not through displayed text. */}
+        {target === " " && (
+          <div className="pointer-events-none absolute inset-x-0 top-1/2 z-20 h-px -translate-y-[0.5px] bg-neutral-400/50 dark:bg-black/50" />
+        )}
       </div>
 
       {/* Bottom stripes – decorative, outside the flap area */}
