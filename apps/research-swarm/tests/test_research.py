@@ -73,6 +73,23 @@ class FixtureBackend(engine.AgentBackend):
 
 
 class WorkflowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_budget_stop_preserves_completed_work(self):
+        from runner import execute
+        for limit in [0, 45, 65]:
+            with self.subTest(limit=limit), patch.dict(os.environ, {"SWARM_TOKEN_BUDGET": str(limit)}):
+                backend = FixtureBackend()
+                result = await execute({"episode_id": "fixture-budget-" + uuid.uuid4().hex,
+                                        "statement": "Order preservation", "lean_statement": TARGET},
+                                       backend=backend, progress=lambda event: None)
+                self.assertEqual(result["stop_reason"], "token_budget")
+                self.assertEqual(result["status"], "candidate")
+                self.assertFalse((result.get("proof") or {}).get("verified", False))
+                self.assertGreaterEqual(result["token_usage"]["spent"], limit)
+                if limit:
+                    self.assertEqual(len(result["reports"]), 3)
+                    self.assertTrue(all(result["reports"]))
+                    self.assertTrue(result["discoveries"])
+
     async def run_flow(self, backend, **extra):
         args = {"statement": "Adding the same natural number preserves order.", "lean_statement": TARGET, "proof_attempts": 2, **extra}
         events = []
@@ -86,6 +103,8 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
             result, events = await self.run_flow(backend)
         self.assertEqual(result["status"], "candidate")
         self.assertFalse(result["proof"]["verified"])
+        self.assertEqual(result["stop_reason"], "checker_unavailable")
+        self.assertEqual(backend.proofs, 1)
         self.assertEqual(backend.max_active, 3)
         self.assertTrue(any('"shared_discoveries": [{"id"' in p for p in backend.prompts))
         writer = next(p for p in backend.prompts if p.startswith("Write a Lean"))
@@ -102,7 +121,7 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(b["generation"] > 0 for b in result["branches"]))
 
     async def test_failed_researcher_is_reassigned(self):
-        backend = FixtureBackend(fail_researcher=True)
+        backend = FixtureBackend(fail_researcher=True, stop=True)
         with patch.dict(os.environ, {"SWARM_LEAN_BIN": "nonexistent-lean-for-test"}):
             result, events = await self.run_flow(backend)
         self.assertTrue(all(result["reports"]))

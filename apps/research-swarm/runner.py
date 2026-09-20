@@ -141,12 +141,46 @@ async def execute(args, backend=None, progress=None):
     if args.get("retrieval_bridge"):
         from retrieval import Retrieval
         sys.modules["triviality_retrieval"] = Retrieval(directory, emit)
+    # Snapshot domain events before forwarding them. A budget stop is terminal,
+    # but must not erase the completed prefix of the exploration.
+    snapshot = dict(status="candidate", reports=[], branches=[], discoveries=[],
+                    literature=args.get("literature", []), plan=None, proof=None,
+                    target_origin="user" if args.get("lean_statement", "").strip() else "model")
+
+    def on_progress(event):
+        message = event.message or ""
+        if message.startswith("TRIVIALITY_EVENT "):
+            domain = json.loads(message.removeprefix("TRIVIALITY_EVENT "))
+            kind = domain["kind"]
+            if kind in {"branch", "discovery"}:
+                key, item = ("branches", domain["branch"]) if kind == "branch" else ("discoveries", domain["entry"])
+                items = {value["id"]: value for value in snapshot[key]}
+                items[item["id"]] = item
+                snapshot[key] = list(items.values())
+            elif kind == "plan":
+                snapshot["plan"] = domain["plan"]
+            elif kind == "verification":
+                snapshot["proof"] = domain["proof"]
+            elif kind == "literature":
+                papers = {p["id"]: p for p in snapshot["literature"]}
+                papers.update({p["id"]: p for p in domain.get("papers", [])})
+                snapshot["literature"] = list(papers.values())
+        if progress:
+            progress(event)
+        else:
+            emit("progress", event=asdict(event))
+
     try:
         result = await engine.run_workflow(str(workflow), args=args, backend=backend,
             resume=str(journal), journal_path=str(journal), run_id=episode_id, cap=3,
             budget=engine.BudgetLedger(total=int(os.environ.get("SWARM_TOKEN_BUDGET", "60000"))),
-            progress_sink=progress or (lambda event: emit("progress", event=asdict(event))),
+            progress_sink=on_progress,
             log_sink=lambda message: emit("log", message=message))
+    except engine.BudgetExhausted as error:
+        result = {**snapshot, "reports": [b.get("report") for b in snapshot["branches"]],
+                  "stop_reason": "token_budget", "token_usage": {"spent": error.spent, "limit": error.total},
+                  "summary": f"Token budget reached ({error.spent}/{error.total}). Research stopped without a verified solution. "
+                             "Completed findings, challenges and proof attempts are preserved."}
     finally:
         sys.modules.pop("triviality_retrieval", None)
     (directory / "result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -14,6 +14,7 @@ export type SwarmResult = {
   summary: string; reports: Array<{ approach: string; evidence: string; risks: string; next_step: string } | null>;
   proof?: SwarmProof | null; target_origin?: string;
   branches?: Array<{ id: number; status: string }>;
+  stop_reason?: "token_budget" | "checker_unavailable";
 };
 
 export async function runSwarm(

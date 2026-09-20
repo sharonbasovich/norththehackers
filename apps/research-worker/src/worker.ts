@@ -231,8 +231,13 @@ async function runEpisode(episodeId: string): Promise<void> {
         createdAt: now, updatedAt: now });
       await addGraphNode(episodeId, resultId, "RESEARCH_RESULT", "Team result", outcome.summary, 50, 87, targetVerified ? "verified" : "candidate");
       if (formalizationId) await addGraphEdge(episodeId, formalizationId, resultId, "PRODUCES", "checked outcome");
+      if (outcome.stop_reason) await collections.researchAttempts.updateMany({ episodeId, status: "RUNNING" }, { $set: {
+        status: "CANCELLED", proofState: outcome.summary, completedAt: now, updatedAt: now,
+      } });
       await collections.researchEpisodes.updateOne({ _id: episodeId }, { $set: {
-        status: targetVerified ? "VERIFIED" : "PROMISING", stage: outcome.status === "blocked" ? "Research team blocked" : "Research team complete",
+        status: targetVerified ? "VERIFIED" : "PROMISING", stage: outcome.stop_reason === "token_budget" ? "Token budget reached"
+          : outcome.stop_reason === "checker_unavailable" ? "Lean verification unavailable"
+          : outcome.status === "blocked" ? "Research team blocked" : "Research team complete",
         summary: outcome.summary, progress: 100, completedAt: now, updatedAt: now,
       } });
       await emit(episodeId, "research.job.completed", { verified: targetVerified, outcome: outcome.status });
